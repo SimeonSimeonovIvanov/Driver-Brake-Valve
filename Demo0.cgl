@@ -1,0 +1,20 @@
+Functions called:
+ fflush (4 times)
+ delete (11 times)
+ free (7 times)
+ memset (1 times)
+ sprintf (26 times)
+ new (11 times)
+ calloc (1 times)
+ strlen (127 times)
+ realloc (1 times)
+ strdup (1 times)
+ malloc (4 times)
+ memcpy (2 times)
+Resource types used:
+ object (11 allocs, 11 max)
+ memory block (7 allocs, 7 max)
+Modules used:
+ 00400000 10/17/2017 00:05:20 D:\Developments\Projects\Express service\Stend
+ za kran mashinist\Demo0.exe
+==========================================

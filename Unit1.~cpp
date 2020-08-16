@@ -1,0 +1,539 @@
+/*
+		The^day^of^DooM
+
+	Create Date:	14.05.2012
+	Last Update:	19.05.2012
+	Full Change:	20.05.2012
+	Last Update:	29.05.2012
+    Last Update:	29.05.2012
+
+  	Full Change:	02.06.2013 - Replace old ModBUS with new ModBUS Stack
+    Last Update:	02.06.2013
+    Last Update:	02.06.2013
+    Full Change:	29.11.2013
+    Last Update:    30.11.2013
+    Last Update:    01.12.2013
+*/
+
+#include <vcl.h>
+#pragma hdrstop
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <process.h>
+#include <commctrl.h>
+#include <mmsystem.h>
+
+#include "Unit1.h"
+#include "Unit2.h"
+#include "Unit3.h"
+#include "Unit4.h"
+#include "Unit5.h"
+#include "Unit6.h"
+#include "Unit7.h"
+#include "modbus/modbus.h"
+#include "modbus/modbus-rtu.h"
+#include "modbus/modbus-tcp.h"
+
+#pragma package(smart_init)
+#pragma resource "*.dfm"
+TForm1 *Form1;
+
+__fastcall TForm1::TForm1(TComponent* Owner)
+        : TForm(Owner)
+{
+    deviceCount = 0;
+    fStartTest = false;
+    Button1->Enabled = false;
+
+    for(int i = 0; i < 7; i++) {
+        char buffer[100];
+
+        arrAnalogMeter[i] = new TForm2(this);
+        arrAnalogMeter[i]->Parent = this;
+        sprintf(buffer, "МАНОМЕТЪР %d", 1 + i);
+        arrAnalogMeter[i]->Caption = buffer;
+
+        Chart1->Series[i]->Title = buffer;
+        Chart1->Series[i]->Active = false;
+    }
+
+    chartStep = 0.05;
+    Chart1->BottomAxis->Increment = 1;
+    if(TIMERR_NOERROR == timeBeginPeriod(1)) {
+        DWORD dwThreadId;
+        hTimerThread = CreateThread(NULL, 4096, timerThreadFunc, NULL/*lpParam*/, 0, &dwThreadId);
+        SetThreadPriority(hTimerThread, THREAD_PRIORITY_TIME_CRITICAL);
+    } else {
+        hTimerThread = INVALID_HANDLE_VALUE;
+    }
+}
+
+void __fastcall TForm1::FormCreate(TObject *Sender)
+{
+    SlaveID = 10;
+    Button1->Enabled = false;
+    Setings1->Enabled = false;
+    Disconnect1->Enabled = false;
+    hComThread = INVALID_HANDLE_VALUE;
+
+
+    memset(&mbMaster, 0, sizeof(mbMaster));
+    
+    //COM11Click(Sender);
+    //TCPIP1Click(Sender);
+
+    Chart1->View3D = true;
+    N3D1->Checked = Chart1->View3D;
+    //Printer()->Orientation = poLandscape;
+}
+////////////////////////////////////////////////////////////////////////////////
+void TForm1::loadFile(char *name)
+{
+    FILE *fp;
+
+    if(NULL == (fp = fopen(name, "rb"))) return;
+
+    fread(&deviceCount, sizeof(deviceCount), 1, fp);
+
+    for(int i = 0; i < deviceCount; i++) {
+        arrDeviceType[i].readFromFile(fp);
+    }
+
+    fclose(fp);
+}
+
+void TForm1::saveFile(char *name)
+{
+    FILE *fp;
+
+    if(NULL == (fp = fopen(name, "wb"))) return;
+
+    fwrite(&deviceCount, sizeof(deviceCount), 1, fp);
+
+    for(int i = 0; i < deviceCount; i++) {
+        arrDeviceType[i].writeToFile(fp);
+    }
+
+    fclose(fp);
+}
+////////////////////////////////////////////////////////////////////////////////
+void TForm1::createDeviceListBox(void)
+{
+    ListBox1->Clear();
+    for(int i = 0; i < deviceCount; i++) {
+        ListBox1->AddItem(arrDeviceType[i].Name, NULL);
+    }
+}
+
+void __fastcall TForm1::filePrintSetingsClick(TObject *Sender)
+{
+    PrinterSetupDialog1->Execute();
+
+    Sender = Sender;
+}
+
+void __fastcall TForm1::Form1OnResize(TObject *Sender)
+{
+    Form1->Top = 0;
+    Form1->Left = 0;
+
+    Chart1->Left = 10;
+    Chart1->Width = Form1->Width - (Chart1->Left + 10);
+    Chart1->Top = Form1->Height - Form1->Height / 2;
+    Chart1->Height = Form1->Height - (Chart1->Top + 30);
+
+    Panel2->Top = 10;
+    Panel2->Left = 10;
+    Panel2->Height = Chart1->Top - 2 * Panel2->Top;
+
+    GroupBox1->Top = 5;
+    GroupBox1->Left = GroupBox1->Top;
+    GroupBox1->Width = Panel2->Width - 2 * GroupBox1->Left;
+    GroupBox1->Height = Panel2->Height - 2 * GroupBox1->Top;
+
+    Button1->Top = GroupBox1->Height - (Button1->Height + 10);
+    Button2->Top = Button1->Top;
+    ListBox1->Height = (Button2->Top - 10) - ListBox1->Top;
+
+    int x = 0, y = 0;
+    for(int i = 0; i < 7; i++) {
+        if(true == Chart1->Series[i]->Active) {
+                int step = (Form1->Width - (10 + Panel2->Left + Panel2->Width)) / 4;
+
+                arrAnalogMeter[i]->Width = step - 10;
+                arrAnalogMeter[i]->Top = Panel2->Top + (y*10) + y* arrAnalogMeter[i]->Height;
+                arrAnalogMeter[i]->Left = x * step + (10 + Panel2->Left + Panel2->Width);
+
+                if(++x > 3) {
+                    x = 0;
+                    ++y;
+                }
+
+                arrAnalogMeter[i]->Show();
+        } else arrAnalogMeter[i]->Hide();
+    }
+
+    Sender = Sender;
+}
+
+// Избор на кран машинист от списъка:
+void __fastcall TForm1::ListBox1Click(TObject *Sender)
+{
+    Button1->Enabled = false;
+    if( ListBox1->ItemIndex > -1 ) {
+
+        arrDeviceType[ListBox1->ItemIndex].currentTest.setTestDataToChart(Chart1, chartStep);
+
+        for(int i = 0; i < 7; i++) {
+            Chart1->Series[i]->Active = arrDeviceType[ListBox1->ItemIndex].arrAnalogIputIsEnable[i];
+            Chart1->Series[i]->ShowInLegend = Chart1->Series[i]->Active;
+
+            if(arrDeviceType[ListBox1->ItemIndex].arrAnalogIputIsEnable[i]) {
+                if( true == mbMaster.enable ) {
+                    Button1->Enabled = true;
+                }
+            }
+        }
+        Form1->OnResize(Sender);
+        Form1->OnResize(Sender);
+    }
+}
+
+void __fastcall TForm1::Button1Click(TObject *Sender)
+{
+    unsigned char outPort[12];
+
+    if( 0 > ListBox1->ItemIndex ) {
+        return;
+    }
+
+    if( false == fStartTest && mbMaster.enable ) {
+
+        for( int i = 0; i < 12; i++ ) {
+            outPort[ i ] = arrDeviceType[2].arrDigitalOutputIsEnable[i];
+        }
+
+        fStartTest = true;
+        Button2->Enabled = false;
+        ListBox1->Enabled = false;
+        Button1->Caption = "Стоп тест";
+
+        for(int i = 0; i < 7; i++) {
+            Chart1->Series[i]->Clear();
+            Form3->Chart1->Series[i]->Clear();
+        }
+
+        chartPos = 0;
+        arrDeviceType[ListBox1->ItemIndex].currentTest.Free();
+        arrDeviceType[ListBox1->ItemIndex].currentTest.setTestTime();
+
+        Setings1->Enabled = false;
+        Disconnect1->Enabled = false;
+        ConnectoTo1->Enabled = false;
+    } else {
+        fStartTest = false;
+        Button2->Enabled = true;
+        ListBox1->Enabled = true;
+        Button1->Caption = "Старт тест";
+
+        memset( outPort, 0, sizeof(outPort) );
+
+        arrDeviceType[ListBox1->ItemIndex].currentTest.getTestDataFromChart(Chart1);
+
+        Setings1->Enabled = true;
+        Disconnect1->Enabled = true;
+        ConnectoTo1->Enabled = true;
+    }
+
+    mbWriteMultipleCoils( &Form1->mbMaster, 10, 0, 7,  outPort );
+
+    Sender = Sender;
+}
+
+// Извежда диалог за принтиране на снетата графика:
+void __fastcall TForm1::Button2Click(TObject *Sender)
+{
+    if(ListBox1->ItemIndex < 0) return;
+
+    Form3->setDateAndTime(arrDeviceType[ListBox1->ItemIndex].currentTest.getTestTime());
+    arrDeviceType[ListBox1->ItemIndex].currentTest.setTestDataToChart(Form3->Chart1, Form1->chartStep);
+    for(int i = 0; i < 7; i++) {
+        Form3->Chart1->Series[i]->Active = Chart1->Series[i]->Active;
+    }
+    Form3->Show();
+
+    Sender = Sender;
+}
+
+void __fastcall TForm1::Timer1Timer(TObject *Sender)
+{
+    if( ListBox1->ItemIndex > -1 ) {
+        for(int i = 0; i < 7; i++) {
+            if(true == arrDeviceType[ListBox1->ItemIndex].arrAnalogIputIsEnable[i]) {
+                arrAnalogMeter[i]->SetAngle(270.0 - ((270.0/1000.0) * (0xfff&Form1->arrADC[i])));
+            }
+        }
+    }
+
+    Sender = Sender;
+}
+
+DWORD WINAPI timerThreadFunc(LPVOID lpParam)
+{
+    DWORD start;
+
+    lpParam = lpParam;
+    while(1) {
+        start = timeGetTime();
+        while( timeGetTime() < ( start + 1000 * Form1->chartStep ) ) {
+            Sleep(10);
+        }
+
+        if( true == Form1->fStartTest ) {
+            for( int i = 0; i < 7; i++ ) {
+                if( true == Form1->Chart1->Series[i]->Active ) {
+                    Form1->Chart1->Series[i]->AddXY(Form1->chartPos, (0xfff & Form1->arrADC[i]) / 100.0);
+                }
+            }
+            Form1->chartPos += Form1->chartStep;
+        }
+    }
+}
+
+DWORD WINAPI comThreadFunc(LPVOID lpParam)
+{
+    lpParam = lpParam;
+    while(1) {
+        mbReadInputRegister( &Form1->mbMaster, Form1->SlaveID, 7, 7, Form1->arrADC );
+        Sleep(1);
+    }
+    return 0;
+}
+
+void __fastcall TForm1::Setings1Click(TObject *Sender)
+{
+    if(INVALID_HANDLE_VALUE != mbMaster.hCom) {
+        COMMCONFIG CC;
+        char szBuffer[11];
+        GetCommState(mbMaster.hCom, &mbMaster.dcb);
+        CC.dcb = mbMaster.dcb;
+        sprintf(szBuffer, "COM%d", uiComIndex);
+        CommConfigDialog(szBuffer, NULL, &CC);
+        mbMaster.dcb.Parity = CC.dcb.Parity;
+        mbMaster.dcb.BaudRate = CC.dcb.BaudRate;
+        mbMaster.dcb.StopBits = CC.dcb.StopBits;
+        SetCommState(mbMaster.hCom, &mbMaster.dcb);
+    }
+    Sender = Sender;
+}
+
+void __fastcall TForm1::Disconnect1Click(TObject *Sender)
+{
+    if( INVALID_HANDLE_VALUE != Form1->hComThread ) {
+		TerminateThread( Form1->hComThread, 0 );
+		CloseHandle( Form1->hComThread );
+        hComThread = INVALID_HANDLE_VALUE;
+	}
+
+    mbMasterDisconnect( &mbMaster );
+
+    fStartTest = false;
+    Button1->Enabled = false;
+    Setings1->Enabled = false;
+    Disconnect1->Enabled = false;
+    memset( &arrADC, 0, sizeof(arrADC) );
+
+    uiComIndex = 0;
+    COM11->Checked = false;     COM51->Checked = false;
+    COM21->Checked = false;     COM61->Checked = false;
+    COM31->Checked = false;     COM71->Checked = false;
+    COM41->Checked = false;     COM81->Checked = false;
+    TCPIP1->Checked = false;
+
+    Sender = Sender;
+}
+
+void __fastcall TForm1::N3D1Click(TObject *Sender)
+{
+    if(true == N3D1->Checked) {
+        N3D1->Checked = false;
+        Chart1->View3D = false;
+    } else {
+        N3D1->Checked = true;
+        Chart1->View3D = true;
+    }
+    Sender = Sender;
+}
+void __fastcall TForm1::EDIT1Click(TObject *Sender)
+{
+    Form5->ShowModal();
+    Sender = Sender;
+}
+
+void __fastcall TForm1::fileExitClick(TObject *Sender)
+{
+    if( mbMaster.enable ) {
+        memset(&outPort, 0, sizeof(outPort));
+        mbWriteMultipleCoils( &Form1->mbMaster, 10, 0, 12,  outPort );
+        Sleep(10);
+        Disconnect1Click(Sender);
+    }
+
+    for(int i = 0; i < 7; i++) {
+        arrAnalogMeter[i]->Close();
+        //arrAnalogMeter[i]->FreeInstance();
+    }
+
+    //Application->Terminate();
+    Form1->Hide();
+    Form1->Close();
+
+    Sender = Sender;
+}
+
+void __fastcall TForm1::OnDestroy(TObject *Sender)
+{
+    ListBox1->Clear();
+    Chart1->CleanupInstance();
+    Sender = Sender;
+}
+
+void __fastcall TForm1::N2Click(TObject *Sender)
+{
+    Form6->ShowModal();
+    Sender = Sender;
+}
+
+void __fastcall TForm1::N3Click(TObject *Sender)
+{
+    if(ListBox1->ItemIndex > -1) {
+        Form7->ShowModal();
+        if(true == Form7->saveAndExit) {
+            arrDeviceType[ListBox1->ItemIndex].currentTest.setSerialNumber(Form7->Edit1->Text);
+            arrDeviceType[ListBox1->ItemIndex].addToTestList(&arrDeviceType[ListBox1->ItemIndex].currentTest);
+        }
+    }
+    Sender = Sender;
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::Save1Click(TObject *Sender)
+{
+    saveFile("test.bin");
+    Sender = Sender;
+}
+
+void __fastcall TForm1::Load1Click(TObject *Sender)
+{
+    for(int i = 0; i < 7; i++) {
+        Chart1->Series[i]->Clear();
+    }
+
+    loadFile("test.bin");
+    createDeviceListBox();
+    Sender = Sender;
+}
+//------------------------------------------------------------------------------
+
+int TForm1::COMxxClick(int com)
+{
+    if( !mbMasterInit( &mbMaster, 1 ) ) {
+        if( !mbRTUMasterConnect( &mbMaster, com ) ) {
+            DWORD dwThreadId;
+
+            hComThread = CreateThread(NULL, 4096, comThreadFunc, NULL, 0, &dwThreadId);
+            SetThreadPriority(Form1->hComThread, THREAD_PRIORITY_TIME_CRITICAL);
+
+            uiComIndex = com;
+            Setings1->Enabled = true;
+            Disconnect1->Enabled = true;
+        }
+
+        return 1;
+    }
+
+    return 0;
+}
+
+void __fastcall TForm1::COM11Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if(COMxxClick(1)) {
+        COM11->Checked = true;
+    }
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::COM21Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if(COMxxClick(2)) {
+        COM21->Checked = true;
+    }
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::COM31Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if(COMxxClick(3)) {
+        COM31->Checked = true;
+    }
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::COM41Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if(COMxxClick(4)) {
+        COM41->Checked = true;
+    }
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::COM51Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if(COMxxClick(5)) {
+        COM51->Checked = true;
+    }
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::COM61Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if(COMxxClick(6)) {
+        COM61->Checked = true;
+    }
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::COM71Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if(COMxxClick(7)) {
+        COM71->Checked = true;
+    }
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::COM81Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if(COMxxClick(8)) {
+        COM81->Checked = true;
+    }
+}
+//------------------------------------------------------------------------------
+void __fastcall TForm1::TCPIP1Click(TObject *Sender)
+{
+    Disconnect1Click(Sender);
+    if( !mbMasterInit( &mbMaster, 2 ) ) {
+        if( !mbTCPMasterConnect( &mbMaster, "192.168.0.11", 502 ) ) {
+            DWORD dwThreadId;
+
+            hComThread = CreateThread(NULL, 4096, comThreadFunc, NULL, 0, &dwThreadId);
+        	SetThreadPriority(Form1->hComThread, THREAD_PRIORITY_TIME_CRITICAL);
+
+            uiComIndex = 0;
+            TCPIP1->Checked = true;
+            Setings1->Enabled = true;
+            Disconnect1->Enabled = true;
+        }
+    }
+}
+//------------------------------------------------------------------------------
